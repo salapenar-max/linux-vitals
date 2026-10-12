@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `last_reboot` reports `Unknown` when `who -b` returns empty,
+  whitespace-only, or missing output, and strips the `system boot` prefix
+  from normal timestamps
+  ([#122](https://github.com/sameeralam3127/linux-vitals/issues/122)).
+
 ### Added
 
 - **A finding can say that a check could not run**
