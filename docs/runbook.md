@@ -88,7 +88,18 @@ on this host as unproven until logging is back.**
 ### `service_manual_followup` -- a service requires manual follow-up
 
 **Means:** `vitals_heal` restarted an enabled service that was in a failed
-state, and it did not come back. The `subject` field names the unit.
+state, and the restart did not hold. The `subject` field names the unit; the
+matching entry in `self_healing.healing_results` says why in `reason` and
+`detail` (see [Self-healing outcomes](report-guide.md#self-healing-outcomes)):
+
+| `reason` | What happened |
+| --- | --- |
+| `failed` | It failed again: its start job failed (`detail` then quotes the restart's error), or it came up and failed within the stability window |
+| `restarted_during_check` | It came up, crashed, and systemd's `Restart=` brought it back -- it is flapping |
+| `restart_error` | `systemctl start` failed without leaving a failed unit -- the unit is missing, or its state could not be read; `detail` has the error |
+| `inactive` | It is not running, but did not fail either -- often a unit whose process exited cleanly |
+| `not_settled` | Still starting or stopping when the polling budget ran out (finding `status: unknown`) |
+| `check_failed` | Its state could not be read after the restart (finding `status: unknown`) |
 
 **Confirm:**
 ```bash
@@ -100,12 +111,9 @@ systemctl list-dependencies --failed <unit>
 **Do:** a unit that fails a clean restart has a real cause -- a config it
 cannot parse, a port already bound, a dependency that is itself down, a
 filesystem it cannot write. Read the journal from the restart attempt forward.
-
-**Note the known race** ([#24](https://github.com/sameeralam3127/linux-vitals/issues/24)):
-`service_facts` can be read before a restarted unit has settled, so a service
-that died again immediately may be reported `Fixed` rather than appearing here.
-If a service is misbehaving but the report says it was fixed, trust
-`systemctl`, not the report.
+For `not_settled`, check whether the unit came up after the run: if it did,
+it is slow to start, and `linux_vitals_heal_settle_retries` /
+`linux_vitals_heal_settle_delay` can give it longer.
 
 ### `cert_expired` -- a certificate has already expired
 
@@ -214,9 +222,10 @@ A permanent warning that everyone ignores is worse than no warning.
 log window (default 7 days). Often paired with `boot_space_low` -- a failed
 kernel install is usually a full `/boot`.
 
-**Confirm:**
+**Confirm:** this is the filter the scan runs on the host:
 ```bash
-journalctl --since "7 days ago" | grep -iE "dracut|initramfs|grub|kernel"
+journalctl --system --since "7 days ago" --output=short-iso \
+  | grep -aEi '(kernel|grub|dracut|initramfs).*(fail|error)'
 ```
 
 **Do:** re-run the failed transaction after fixing the cause, and **verify the
@@ -227,18 +236,28 @@ GRUB but has no initramfs will not boot.
 
 ### `log_errors` -- recent logs contain error entries
 
-**Means:** `journalctl` matched `error`/`failed` in the log window. Healthy
-hosts do this routinely, which is why it is `info`.
+**Means:** the journal holds entries at priority `err` or worse
+(`linux_vitals_log_priority`) in the log window. Healthy hosts log some of
+these routinely, which is why it is `info`.
+
+**Confirm:**
+```bash
+journalctl --system --since "30 minutes ago" --priority err --no-pager
+```
 
 **Do:** read the excerpt in the dashboard before acting. Escalate only if the
 count is anomalous for the host, or if the excerpt names a service you care
 about. A sudden fleet-wide jump is worth investigating; a steady background
-count is not.
+count is not. A count equal to `linux_vitals_log_max_lines` (default `2000`)
+means at least that many -- see
+[tuning the journal scans](troubleshooting.md#tuning-the-journal-scans-for-chatty-hosts).
 
-**Watch for a false positive:** Ansible logs its own module invocations to the
-journal, and lines like `argv=['systemctl', 'is-failed', ...]` match the error
-filter. If this finding appears on hosts you have just run automation against,
-set `no_target_syslog = True` in your `ansible.cfg`.
+**Watch for a false negative:** the finding counts by priority, not wording.
+A service that writes its errors to stdout or stderr without a syslog
+priority prefix is logged at `info` and is not counted; check that unit
+directly with `journalctl -u <unit>`. Warnings are not counted either,
+including systemd's `Failed with result '...'` line for a failed unit; set
+`linux_vitals_log_priority: warning` to include them.
 
 ### `failed_logins` -- recent failed login attempts
 
@@ -366,9 +385,10 @@ It sometimes is, and knowing where saves you chasing a phantom:
   `summary.servers_checked` against your inventory count.
 - **`failed_logins` absent does not mean no failed logins** if `lastb` could
   not run ([#39](https://github.com/sameeralam3127/linux-vitals/issues/39)).
-- **A service reported `Fixed` may have died again immediately**
-  ([#24](https://github.com/sameeralam3127/linux-vitals/issues/24)). Trust
-  `systemctl`.
+- **A service reported `Fixed` stayed up for
+  `linux_vitals_heal_stability_seconds` (5 s by default), not forever.** One
+  that fails later than that is still reported `Fixed`. Trust `systemctl`
+  for anything that has had time to fail since the run.
 - **Reboot detection degrades to a kernel comparison** where the distro tool
   is missing, which is noisier. `reboot.source` tells you which path answered;
   see [kernel-reboot-detection.md](kernel-reboot-detection.md#known-edge-cases).
@@ -383,3 +403,12 @@ It sometimes is, and knowing where saves you chasing a phantom:
 If a finding is wrong rather than unwelcome, that is a bug --
 [open an issue](https://github.com/sameeralam3127/linux-vitals/issues). If it
 is a security problem, see [SECURITY.md](../.github/SECURITY.md) instead.
+
+## Unreadable system journals
+
+`log_errors` and `kernel_install_failures` are `unknown` with a reason when
+journal access is denied, `journalctl` fails, or the host does not use systemd.
+An empty successful system-journal read is clean. Without `become` or journal
+group access, expect unknown findings rather than zero errors. Inspect the
+reason before changing journal permissions or the requested time window.
+See [the finding contract](report-guide.md#status-when-a-check-could-not-run).

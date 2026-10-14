@@ -72,7 +72,7 @@ What degrades without escalation, rather than failing:
 
 | Probe | Without `become` |
 | --- | --- |
-| `journalctl` | Only the invoking user's journal; error counts under-report |
+| `journalctl` | Explicit system-journal read; denied access reports `unknown`, not a clean zero |
 | `lastb` | Fails; reported as unavailable, **not** as zero failed logins (see [#39](https://github.com/sameeralam3127/linux-vitals/issues/39)) |
 | `needs-restarting`, `zypper needs-rebooting` | Usually fails; falls back to kernel comparison |
 | `getenforce`, `aa-status` | Usually readable unprivileged |
@@ -102,11 +102,15 @@ treat LinuxVitals as read-only.
 `execve` without a shell parsing them.
 
 Five probes do run `sh -c` with an inline script -- kernel enumeration,
-bootloader inspection, and the three per-family reboot checks. **None of those
-scripts interpolate a Jinja variable.** They are static text; the only
-templated value anywhere near a command is `linux_vitals_log_window`, which is
-a separate `argv` element passed to `journalctl --since` and never reaches a
-shell.
+bootloader inspection, and the three per-family reboot checks -- and the
+kernel-install-failure scan runs `bash -c`, for `pipefail`, to filter the
+journal with `grep` on the host. **None of those scripts interpolate a Jinja
+variable.** They are static text. The templated values near a command --
+`linux_vitals_log_window`, `linux_vitals_audit_log_window`,
+`linux_vitals_log_priority` and `linux_vitals_log_max_lines` -- are each a
+separate `argv` element: passed straight to `journalctl`, or handed to the
+`bash` script as a positional parameter that it only ever expands quoted
+(`"$1"`), so none of them is parsed as shell code.
 
 That is the property to preserve, and the one most likely to be broken by a
 well-meaning change. **If you add a probe, put host data in its own `argv`
@@ -122,7 +126,10 @@ contract, from [roles/vitals_heal/tasks/main.yml](../roles/vitals_heal/tasks/mai
 
 **It can:** issue exactly one `service: state=restarted` per unit that is both
 (a) reported by `service_facts` as `failed`, and (b) answers `enabled` to
-`systemctl is-enabled`.
+`systemctl is-enabled`. Afterwards it only reads: `systemctl show` on each
+unit it tried to restart, polled until the unit settles and, for a unit that
+came up, once more after the stability window, with the unit name as its own
+`argv` element.
 
 **It cannot:**
 
@@ -150,11 +157,13 @@ consequences worth accepting deliberately:
   required-service list configurable is tracked as
   [#32](https://github.com/sameeralam3127/linux-vitals/issues/32).)
 
-Also note the known race in [#24](https://github.com/sameeralam3127/linux-vitals/issues/24):
-`service_facts` can be read before a restarted unit has settled, so a service
-that died again immediately may be reported `Fixed`. That is a correctness bug
-with a trust consequence -- the report can assert a remediation that did not
-hold.
+A remediation claim is stronger than a detection claim, so `Fixed` is only
+reported once a restart has held: the unit came up and was still active, on
+the same run, after `linux_vitals_heal_stability_seconds`
+([#24](https://github.com/sameeralam3127/linux-vitals/issues/24)). When that
+check cannot complete, the attempt is reported as `unknown`, not `Fixed`. The
+limit is the window itself: a unit that fails after it is still reported
+`Fixed`.
 
 ## `vitals_certs`: the only role that opens a connection
 
@@ -360,3 +369,12 @@ Do not open a public issue. Use
 [private vulnerability reporting](https://github.com/sameeralam3127/linux-vitals/security/advisories/new),
 or the email address in [SECURITY.md](../.github/SECURITY.md). Response targets are
 documented there.
+
+## Unreadable system journals
+
+`log_errors` and `kernel_install_failures` are `unknown` with a reason when
+journal access is denied, `journalctl` fails, or the host does not use systemd.
+An empty successful system-journal read is clean. Without `become` or journal
+group access, expect unknown findings rather than zero errors. Inspect the
+reason before changing journal permissions or the requested time window.
+See [the finding contract](report-guide.md#status-when-a-check-could-not-run).

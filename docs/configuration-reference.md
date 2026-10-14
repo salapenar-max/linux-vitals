@@ -15,13 +15,18 @@ linux_vitals_ram_critical_threshold: 95
 linux_vitals_boot_warning_threshold: 20
 linux_vitals_log_window: "30 minutes ago"
 linux_vitals_audit_log_window: "7 days ago"
+linux_vitals_log_priority: err
+linux_vitals_log_max_lines: 2000
 ```
 
 `linux_vitals_log_window` / `linux_vitals_audit_log_window` accept anything
-`journalctl --since` understands. A host fails (`final_status: Fail`) if
-RAM usage reaches the critical threshold, boot space drops below the
-warning threshold, or any other finding fires (see
-[report-guide.md](report-guide.md#findings) for the full list).
+`journalctl --since` understands. `log_errors` counts entries at
+`linux_vitals_log_priority` or worse, and each journal scan returns at most
+`linux_vitals_log_max_lines` lines per host (see
+[tuning the journal scans](troubleshooting.md#tuning-the-journal-scans-for-chatty-hosts)).
+A host fails (`final_status: Fail`) if RAM usage reaches the critical
+threshold, boot space drops below the warning threshold, or any other finding
+fires (see [report-guide.md](report-guide.md#findings) for the full list).
 
 ## Self-healing
 
@@ -35,6 +40,24 @@ linux_vitals_heal_enabled: true
 When enabled, exactly one restart is attempted per systemd-enabled failed
 service, once per run. A service that's still failed afterward is reported
 as `"Failed to Fix"` and adds a finding; it is not retried.
+
+A restart is only reported `"Fixed"` once it has held. Each restarted unit is
+polled until it is active, failed or inactive, and a unit that came up must
+still be active on the same run after a stability window. One that dies or is
+restarted by systemd in that window is `"Failed to Fix"`. One still starting
+when the polling budget runs out is `"Manual Intervention Required"` with an
+`unknown` finding, because nobody could tell. The budget is configurable:
+
+```yaml
+linux_vitals_heal_settle_retries: 10      # extra polls while a unit is still changing state
+linux_vitals_heal_settle_delay: 3         # seconds between polls (30 s in total by default)
+linux_vitals_heal_stability_seconds: 5    # how long a unit must stay up to count as fixed
+```
+
+Hosts where nothing was restarted pay none of this. Raise
+`linux_vitals_heal_stability_seconds` for services known to fail some time
+after starting; raise the settle budget for units that take longer than 30 s
+to leave `activating` after a restart.
 
 ## Maintenance workflow
 
